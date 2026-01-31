@@ -59,6 +59,7 @@ Settings are resolved in this order: CLI flag → environment variable → confi
 | `--tls/--no-tls` | `TRANSMISSION_TLS` | Force HTTPS on/off (default HTTP) |
 | `--insecure` | `TRANSMISSION_VERIFY_SSL=0` | Disable TLS verification |
 | `--log-level` | `TRANSMISSION_LOG_LEVEL` | `trace`, `debug`, `info`, etc. |
+| `--config` | `TRANSMISSION_TUI_CONFIG` | Path to config.toml |
 
 Config file example (`$XDG_CONFIG_HOME/transmission-tui/config.toml`):
 
@@ -72,6 +73,7 @@ tls = true
 verify_ssl = false
 poll_interval = 2.5
 ```
+Press `o` in normal mode to open the in-app **Preferences** overlay. The UI fetches the daemon's live session settings (the same ones in `settings.json`) and lets you adjust them without leaving the terminal. You can tweak the download folder, whether torrents start automatically, upload/download limits, stop-at-ratio and idle timers, peer limits, encryption policy (prefer/allow/require), peer discovery toggles (PEX/DHT/LPD), and blocklist settings, then save the changes straight to the running daemon.
 
 ## Key Bindings
 
@@ -83,6 +85,7 @@ poll_interval = 2.5
 - `p`: Pause the selected torrent
 - `R`: Manual refresh (in addition to the background poller)
 - `a`: Add magnet link (paste + Enter, Esc to cancel)
+- `o`: Edit daemon preferences (download dir, limits, etc.)
 - `dd`: Remove the selected torrent (confirmation prompt)
 - `?`: Toggle the in-app help overlay with the full binding list
 - `q` or `Ctrl+c`: Quit the UI

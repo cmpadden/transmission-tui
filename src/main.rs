@@ -1,5 +1,6 @@
 mod config;
 mod model;
+mod preferences;
 mod rpc;
 mod tui;
 

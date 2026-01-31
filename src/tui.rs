@@ -25,6 +25,7 @@ use ratatui::{
 use crate::{
     config::AppConfig,
     model::{format_bytes, format_eta, format_progress, format_speed, Snapshot, TorrentSummary},
+    preferences::{DaemonPreferences, EncryptionMode},
     rpc::{RpcResult, TransmissionClient},
 };
 
@@ -174,6 +175,8 @@ fn handle_command(client: &TransmissionClient, cmd: RpcCommand, tx: &Sender<AppE
         } => handle_remove(client, id, name, delete_data, tx),
         RpcCommand::ResumeTorrent { id, name } => handle_resume(client, id, name, tx),
         RpcCommand::PauseTorrent { id, name } => handle_pause(client, id, name, tx),
+        RpcCommand::FetchPreferences => handle_fetch_preferences(client, tx),
+        RpcCommand::UpdatePreferences(prefs) => handle_update_preferences(client, prefs, tx),
     }
 }
 
@@ -271,12 +274,39 @@ fn handle_pause(client: &TransmissionClient, id: i64, name: String, tx: &Sender<
     }
 }
 
+fn handle_fetch_preferences(client: &TransmissionClient, tx: &Sender<AppEvent>) {
+    let result = client.fetch_preferences();
+    let _ = tx.send(AppEvent::Preferences(result));
+}
+
+fn handle_update_preferences(
+    client: &TransmissionClient,
+    prefs: DaemonPreferences,
+    tx: &Sender<AppEvent>,
+) {
+    match client
+        .update_preferences(&prefs)
+        .and_then(|_| client.fetch_preferences())
+    {
+        Ok(updated) => {
+            let _ = tx.send(AppEvent::Preferences(Ok(updated)));
+            let _ = tx.send(AppEvent::Status(StatusUpdate::success(
+                "Preferences updated",
+            )));
+        }
+        Err(err) => {
+            let _ = tx.send(AppEvent::Preferences(Err(err)));
+        }
+    }
+}
+
 enum AppEvent {
     Input(Event),
     Tick,
     Snapshot(RpcResult<Snapshot>),
     Status(StatusUpdate),
     FocusTorrent(Option<i64>),
+    Preferences(RpcResult<DaemonPreferences>),
 }
 
 #[derive(Clone)]
@@ -349,6 +379,7 @@ impl StatusMessage {
 struct App {
     connection_label: String,
     snapshot: Option<Snapshot>,
+    preferences_cache: Option<DaemonPreferences>,
     list_state: ListState,
     filtered_indices: Vec<usize>,
     filter_text: String,
@@ -369,6 +400,7 @@ impl App {
         Self {
             connection_label: config.rpc.endpoint(),
             snapshot: None,
+            preferences_cache: None,
             list_state: ListState::default(),
             filtered_indices: Vec::new(),
             filter_text: String::new(),
@@ -435,6 +467,11 @@ impl App {
                     .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, area);
                 frame.render_widget(paragraph, area);
+            }
+            InputMode::Preferences(state) => {
+                let area = centered_rect(80, 80, frame.size());
+                frame.render_widget(Clear, area);
+                self.render_preferences(frame, area, state);
             }
             _ => {}
         }
@@ -558,6 +595,90 @@ impl App {
         }
     }
 
+    fn render_preferences(&self, frame: &mut Frame, area: Rect, state: &PreferencesState) {
+        let block = Block::default()
+            .title(Span::raw(" Preferences "))
+            .borders(Borders::ALL);
+        let paragraph = match &state.view {
+            PreferencesView::Loading => Paragraph::new("Loading preferences…").block(block),
+            PreferencesView::Error(message) => {
+                let lines = vec![
+                    Line::from("Failed to load daemon preferences."),
+                    Line::from(message.as_str()),
+                    Line::from("Press r to retry or Esc to close."),
+                ];
+                Paragraph::new(lines).block(block).wrap(Wrap { trim: true })
+            }
+            PreferencesView::Ready(form) => {
+                let mut lines = Vec::new();
+                let mut instructions = vec![
+                    "j/k move",
+                    "Space toggle",
+                    "Enter edit",
+                    "s save",
+                    "r reload",
+                    "Esc close",
+                ];
+                if form.editing.is_some() {
+                    instructions = vec!["Type to edit", "Enter apply", "Esc cancel"];
+                }
+                lines.push(Line::from(instructions.join("  ·  ")));
+                lines.push(Line::from(""));
+                for (idx, field) in PREFERENCE_FORM_FIELDS.iter().enumerate() {
+                    let mut spans = Vec::new();
+                    if idx == form.selected {
+                        spans.push(Span::styled("> ", Style::default().fg(Color::Yellow)));
+                    } else {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(
+                        format!("{:<28}", field.label()),
+                        Style::default().add_modifier(if idx == form.selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    ));
+                    spans.push(Span::raw(field.display_value(&form.prefs)));
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+                if let Some(editor) = &form.editing {
+                    lines.push(Line::from(format!(
+                        "Editing {}: {}",
+                        editor.field.label(),
+                        editor.buffer
+                    )));
+                    if let Some(msg) = &form.message {
+                        lines.push(Line::from(Span::styled(
+                            msg.as_str(),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                } else if let Some(msg) = &form.message {
+                    lines.push(Line::from(Span::styled(
+                        msg.as_str(),
+                        if form.saving {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        },
+                    )));
+                }
+                if form.saving {
+                    lines.push(Line::from(Span::styled(
+                        "Saving preferences…",
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                Paragraph::new(lines)
+                    .block(block)
+                    .wrap(Wrap { trim: false })
+            }
+        };
+        frame.render_widget(paragraph, area);
+    }
+
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let mode_label = match &self.mode {
             InputMode::Normal => "NORMAL",
@@ -565,6 +686,7 @@ impl App {
             InputMode::Prompt(_) => "PROMPT",
             InputMode::Confirm(_) => "CONFIRM",
             InputMode::Help => "HELP",
+            InputMode::Preferences(_) => "PREFS",
         };
         let filter_display = match &self.mode {
             InputMode::Filter { buffer } => format!("/{}", buffer),
@@ -637,6 +759,10 @@ impl App {
             }
             AppEvent::FocusTorrent(target) => {
                 self.pending_focus = target;
+                Ok(false)
+            }
+            AppEvent::Preferences(result) => {
+                self.apply_preferences_event(result);
                 Ok(false)
             }
         }
@@ -774,6 +900,27 @@ impl App {
                         }
                         Ok(false)
                     }
+                    InputMode::Preferences(state) => {
+                        let result = state.handle_key(key);
+                        if let Some(cmd) = result.command {
+                            let is_fetch = matches!(&cmd, RpcCommand::FetchPreferences);
+                            if rpc_tx.send(cmd).is_err() {
+                                if is_fetch {
+                                    state.apply_error("Failed to queue preferences refresh".into());
+                                } else if let PreferencesView::Ready(form) = &mut state.view {
+                                    form.saving = false;
+                                    form.message = Some("Failed to queue save".into());
+                                }
+                                self.set_status(StatusUpdate::error(
+                                    "Failed to queue preferences command",
+                                ));
+                            }
+                        }
+                        if result.close {
+                            self.mode = InputMode::Normal;
+                        }
+                        Ok(false)
+                    }
                     InputMode::Normal => Ok(false),
                 }
             }
@@ -797,6 +944,37 @@ impl App {
                 prompt.buffer.push_str(&data);
                 self.mode = InputMode::Prompt(prompt);
                 Ok(false)
+            }
+        }
+    }
+
+    fn open_preferences(&mut self, rpc_tx: &Sender<RpcCommand>) {
+        let mut state = if let Some(cache) = &self.preferences_cache {
+            PreferencesState::from_cache(cache.clone())
+        } else {
+            PreferencesState::loading()
+        };
+        state.mark_refreshing();
+        self.mode = InputMode::Preferences(state);
+        if rpc_tx.send(RpcCommand::FetchPreferences).is_err() {
+            self.set_status(StatusUpdate::error("Failed to request preferences"));
+        }
+    }
+
+    fn apply_preferences_event(&mut self, result: RpcResult<DaemonPreferences>) {
+        match result {
+            Ok(prefs) => {
+                self.preferences_cache = Some(prefs.clone());
+                if let InputMode::Preferences(state) = &mut self.mode {
+                    state.apply_loaded(prefs);
+                }
+            }
+            Err(err) => {
+                let message = format!("Preferences error: {err}");
+                if let InputMode::Preferences(state) = &mut self.mode {
+                    state.apply_error(format!("{err}"));
+                }
+                self.set_status(StatusUpdate::error(message));
             }
         }
     }
@@ -860,6 +1038,11 @@ impl App {
             }
             KeyCode::Char('G') => {
                 self.goto_bottom();
+                Ok(false)
+            }
+            KeyCode::Char('o') => {
+                self.disarm_delete();
+                self.open_preferences(rpc_tx);
                 Ok(false)
             }
             KeyCode::Char('?') => {
@@ -1141,12 +1324,568 @@ impl ConfirmState {
     }
 }
 
+struct PreferencesState {
+    view: PreferencesView,
+}
+
+enum PreferencesView {
+    Loading,
+    Error(String),
+    Ready(PreferencesForm),
+}
+
+struct PreferencesForm {
+    prefs: DaemonPreferences,
+    selected: usize,
+    editing: Option<PreferenceEditor>,
+    dirty: bool,
+    saving: bool,
+    message: Option<String>,
+}
+
+#[derive(Clone)]
+struct PreferenceEditor {
+    field: PreferenceField,
+    buffer: String,
+}
+
+struct PreferenceInputResult {
+    close: bool,
+    command: Option<RpcCommand>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreferenceField {
+    DownloadDir,
+    StartWhenAdded,
+    SpeedLimitUpEnabled,
+    SpeedLimitUp,
+    SpeedLimitDownEnabled,
+    SpeedLimitDown,
+    SeedRatioLimited,
+    SeedRatioLimit,
+    IdleSeedingEnabled,
+    IdleSeedingLimit,
+    PeerLimitPerTorrent,
+    PeerLimitGlobal,
+    Encryption,
+    PexEnabled,
+    DhtEnabled,
+    LpdEnabled,
+    BlocklistEnabled,
+    BlocklistUrl,
+}
+
+const PREFERENCE_FORM_FIELDS: [PreferenceField; 18] = [
+    PreferenceField::DownloadDir,
+    PreferenceField::StartWhenAdded,
+    PreferenceField::SpeedLimitUpEnabled,
+    PreferenceField::SpeedLimitUp,
+    PreferenceField::SpeedLimitDownEnabled,
+    PreferenceField::SpeedLimitDown,
+    PreferenceField::SeedRatioLimited,
+    PreferenceField::SeedRatioLimit,
+    PreferenceField::IdleSeedingEnabled,
+    PreferenceField::IdleSeedingLimit,
+    PreferenceField::PeerLimitPerTorrent,
+    PreferenceField::PeerLimitGlobal,
+    PreferenceField::Encryption,
+    PreferenceField::PexEnabled,
+    PreferenceField::DhtEnabled,
+    PreferenceField::LpdEnabled,
+    PreferenceField::BlocklistEnabled,
+    PreferenceField::BlocklistUrl,
+];
+
+impl PreferencesState {
+    fn loading() -> Self {
+        Self {
+            view: PreferencesView::Loading,
+        }
+    }
+
+    fn from_cache(prefs: DaemonPreferences) -> Self {
+        Self {
+            view: PreferencesView::Ready(PreferencesForm::new(prefs)),
+        }
+    }
+
+    fn apply_loaded(&mut self, prefs: DaemonPreferences) {
+        match &mut self.view {
+            PreferencesView::Ready(form) => form.replace_prefs(prefs),
+            _ => self.view = PreferencesView::Ready(PreferencesForm::new(prefs)),
+        }
+    }
+
+    fn apply_error(&mut self, message: String) {
+        match &mut self.view {
+            PreferencesView::Ready(form) => {
+                form.saving = false;
+                form.message = Some(message);
+            }
+            _ => self.view = PreferencesView::Error(message),
+        }
+    }
+
+    fn mark_refreshing(&mut self) {
+        if let PreferencesView::Ready(form) = &mut self.view {
+            form.message = Some("Refreshing from daemon…".into());
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> PreferenceInputResult {
+        match &mut self.view {
+            PreferencesView::Loading => match key.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => PreferenceInputResult {
+                    close: false,
+                    command: Some(RpcCommand::FetchPreferences),
+                },
+                KeyCode::Esc | KeyCode::Char('q') => PreferenceInputResult {
+                    close: true,
+                    command: None,
+                },
+                _ => PreferenceInputResult {
+                    close: false,
+                    command: None,
+                },
+            },
+            PreferencesView::Error(_) => match key.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    self.view = PreferencesView::Loading;
+                    PreferenceInputResult {
+                        close: false,
+                        command: Some(RpcCommand::FetchPreferences),
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => PreferenceInputResult {
+                    close: true,
+                    command: None,
+                },
+                _ => PreferenceInputResult {
+                    close: false,
+                    command: None,
+                },
+            },
+            PreferencesView::Ready(form) => {
+                if form.editing.is_some() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let _ = form.finish_edit();
+                        }
+                        KeyCode::Esc => form.cancel_edit(),
+                        KeyCode::Backspace => form.pop_char(),
+                        KeyCode::Char(c) => form.push_char(c),
+                        _ => {}
+                    }
+                    return PreferenceInputResult {
+                        close: false,
+                        command: None,
+                    };
+                }
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => form.move_selection(1),
+                    KeyCode::Char('k') | KeyCode::Up => form.move_selection(-1),
+                    KeyCode::Char(' ') => {
+                        form.toggle_selected();
+                    }
+                    KeyCode::Left => {
+                        form.cycle_encryption(-1);
+                    }
+                    KeyCode::Right => {
+                        form.cycle_encryption(1);
+                    }
+                    KeyCode::Enter => {
+                        if !form.start_editor() {
+                            if !form.toggle_selected() {
+                                form.cycle_encryption(1);
+                            }
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(cmd) = form.queue_save() {
+                            return PreferenceInputResult {
+                                close: false,
+                                command: Some(cmd),
+                            };
+                        }
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        if form.dirty {
+                            form.message = Some("Save or cancel changes before refreshing".into());
+                        } else {
+                            self.view = PreferencesView::Loading;
+                            return PreferenceInputResult {
+                                close: false,
+                                command: Some(RpcCommand::FetchPreferences),
+                            };
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        return PreferenceInputResult {
+                            close: true,
+                            command: None,
+                        }
+                    }
+                    _ => {}
+                }
+                PreferenceInputResult {
+                    close: false,
+                    command: None,
+                }
+            }
+        }
+    }
+}
+
+impl PreferencesForm {
+    fn new(prefs: DaemonPreferences) -> Self {
+        Self {
+            prefs,
+            selected: 0,
+            editing: None,
+            dirty: false,
+            saving: false,
+            message: None,
+        }
+    }
+
+    fn replace_prefs(&mut self, prefs: DaemonPreferences) {
+        let was_saving = self.saving;
+        self.prefs = prefs;
+        self.dirty = false;
+        self.saving = false;
+        self.editing = None;
+        self.message = Some(if was_saving {
+            "Preferences saved".into()
+        } else {
+            "Preferences reloaded".into()
+        });
+    }
+
+    fn selected_field(&self) -> PreferenceField {
+        PREFERENCE_FORM_FIELDS[self.selected]
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let len = PREFERENCE_FORM_FIELDS.len() as isize;
+        let mut next = self.selected as isize + delta;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected = next as usize;
+    }
+
+    fn toggle_selected(&mut self) -> bool {
+        if self.selected_field().toggle(&mut self.prefs) {
+            self.dirty = true;
+            self.message = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cycle_encryption(&mut self, delta: isize) -> bool {
+        if self.selected_field() != PreferenceField::Encryption {
+            return false;
+        }
+        let values = EncryptionMode::values();
+        let mut index = values
+            .iter()
+            .position(|mode| *mode == self.prefs.encryption_mode)
+            .unwrap_or(0) as isize;
+        index = (index + delta).rem_euclid(values.len() as isize);
+        self.prefs.encryption_mode = values[index as usize];
+        self.dirty = true;
+        self.message = None;
+        true
+    }
+
+    fn start_editor(&mut self) -> bool {
+        let field = self.selected_field();
+        if !field.requires_editor() {
+            return false;
+        }
+        let buffer = field.initial_value(&self.prefs);
+        self.editing = Some(PreferenceEditor { field, buffer });
+        self.message = None;
+        true
+    }
+
+    fn finish_edit(&mut self) -> Result<(), String> {
+        let Some(editor) = self.editing.take() else {
+            return Ok(());
+        };
+        match editor.field.apply_input(&mut self.prefs, &editor.buffer) {
+            Ok(()) => {
+                self.dirty = true;
+                self.message = Some("Updated value".into());
+                Ok(())
+            }
+            Err(err) => {
+                self.editing = Some(editor);
+                self.message = Some(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    fn cancel_edit(&mut self) {
+        self.editing = None;
+        self.message = None;
+    }
+
+    fn push_char(&mut self, ch: char) {
+        if let Some(editor) = &mut self.editing {
+            editor.buffer.push(ch);
+        }
+    }
+
+    fn pop_char(&mut self) {
+        if let Some(editor) = &mut self.editing {
+            editor.buffer.pop();
+        }
+    }
+
+    fn queue_save(&mut self) -> Option<RpcCommand> {
+        if self.saving {
+            self.message = Some("Save already in progress".into());
+            return None;
+        }
+        if !self.dirty {
+            self.message = Some("No changes to save".into());
+            return None;
+        }
+        self.saving = true;
+        self.message = Some("Saving preferences…".into());
+        Some(RpcCommand::UpdatePreferences(self.prefs.clone()))
+    }
+}
+
+impl PreferenceField {
+    fn label(&self) -> &'static str {
+        match self {
+            PreferenceField::DownloadDir => "Download to",
+            PreferenceField::StartWhenAdded => "Start when added",
+            PreferenceField::SpeedLimitUpEnabled => "Upload limit enabled",
+            PreferenceField::SpeedLimitUp => "Upload limit (KiB/s)",
+            PreferenceField::SpeedLimitDownEnabled => "Download limit enabled",
+            PreferenceField::SpeedLimitDown => "Download limit (KiB/s)",
+            PreferenceField::SeedRatioLimited => "Stop at ratio",
+            PreferenceField::SeedRatioLimit => "Ratio limit",
+            PreferenceField::IdleSeedingEnabled => "Stop if idle",
+            PreferenceField::IdleSeedingLimit => "Idle minutes",
+            PreferenceField::PeerLimitPerTorrent => "Peers per torrent",
+            PreferenceField::PeerLimitGlobal => "Peers overall",
+            PreferenceField::Encryption => "Encryption mode",
+            PreferenceField::PexEnabled => "Use PEX",
+            PreferenceField::DhtEnabled => "Use DHT",
+            PreferenceField::LpdEnabled => "Use LPD",
+            PreferenceField::BlocklistEnabled => "Enable blocklist",
+            PreferenceField::BlocklistUrl => "Blocklist URL",
+        }
+    }
+
+    fn requires_editor(&self) -> bool {
+        matches!(
+            self,
+            PreferenceField::DownloadDir
+                | PreferenceField::SpeedLimitUp
+                | PreferenceField::SpeedLimitDown
+                | PreferenceField::SeedRatioLimit
+                | PreferenceField::IdleSeedingLimit
+                | PreferenceField::PeerLimitPerTorrent
+                | PreferenceField::PeerLimitGlobal
+                | PreferenceField::BlocklistUrl
+        )
+    }
+
+    fn toggle(&self, prefs: &mut DaemonPreferences) -> bool {
+        match self {
+            PreferenceField::StartWhenAdded => {
+                prefs.start_when_added = !prefs.start_when_added;
+                true
+            }
+            PreferenceField::SpeedLimitUpEnabled => {
+                prefs.speed_limit_up_enabled = !prefs.speed_limit_up_enabled;
+                true
+            }
+            PreferenceField::SpeedLimitDownEnabled => {
+                prefs.speed_limit_down_enabled = !prefs.speed_limit_down_enabled;
+                true
+            }
+            PreferenceField::SeedRatioLimited => {
+                prefs.seed_ratio_limited = !prefs.seed_ratio_limited;
+                true
+            }
+            PreferenceField::IdleSeedingEnabled => {
+                prefs.idle_seeding_limit_enabled = !prefs.idle_seeding_limit_enabled;
+                true
+            }
+            PreferenceField::PexEnabled => {
+                prefs.pex_enabled = !prefs.pex_enabled;
+                true
+            }
+            PreferenceField::DhtEnabled => {
+                prefs.dht_enabled = !prefs.dht_enabled;
+                true
+            }
+            PreferenceField::LpdEnabled => {
+                prefs.lpd_enabled = !prefs.lpd_enabled;
+                true
+            }
+            PreferenceField::BlocklistEnabled => {
+                prefs.blocklist_enabled = !prefs.blocklist_enabled;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn display_value(&self, prefs: &DaemonPreferences) -> String {
+        match self {
+            PreferenceField::DownloadDir => prefs.download_dir.clone(),
+            PreferenceField::StartWhenAdded => toggle_label(prefs.start_when_added),
+            PreferenceField::SpeedLimitUpEnabled => toggle_label(prefs.speed_limit_up_enabled),
+            PreferenceField::SpeedLimitUp => format_speed_limit(prefs.speed_limit_up),
+            PreferenceField::SpeedLimitDownEnabled => toggle_label(prefs.speed_limit_down_enabled),
+            PreferenceField::SpeedLimitDown => format_speed_limit(prefs.speed_limit_down),
+            PreferenceField::SeedRatioLimited => toggle_label(prefs.seed_ratio_limited),
+            PreferenceField::SeedRatioLimit => format!("{:.2}", prefs.seed_ratio_limit),
+            PreferenceField::IdleSeedingEnabled => toggle_label(prefs.idle_seeding_limit_enabled),
+            PreferenceField::IdleSeedingLimit => format!("{} minutes", prefs.idle_seeding_limit),
+            PreferenceField::PeerLimitPerTorrent => prefs.peer_limit_per_torrent.to_string(),
+            PreferenceField::PeerLimitGlobal => prefs.peer_limit_global.to_string(),
+            PreferenceField::Encryption => prefs.encryption_mode.label().to_string(),
+            PreferenceField::PexEnabled => toggle_label(prefs.pex_enabled),
+            PreferenceField::DhtEnabled => toggle_label(prefs.dht_enabled),
+            PreferenceField::LpdEnabled => toggle_label(prefs.lpd_enabled),
+            PreferenceField::BlocklistEnabled => toggle_label(prefs.blocklist_enabled),
+            PreferenceField::BlocklistUrl => prefs
+                .blocklist_url
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(none)".to_string()),
+        }
+    }
+
+    fn initial_value(&self, prefs: &DaemonPreferences) -> String {
+        match self {
+            PreferenceField::DownloadDir => prefs.download_dir.clone(),
+            PreferenceField::SpeedLimitUp => prefs.speed_limit_up.to_string(),
+            PreferenceField::SpeedLimitDown => prefs.speed_limit_down.to_string(),
+            PreferenceField::SeedRatioLimit => format!("{:.2}", prefs.seed_ratio_limit),
+            PreferenceField::IdleSeedingLimit => prefs.idle_seeding_limit.to_string(),
+            PreferenceField::PeerLimitPerTorrent => prefs.peer_limit_per_torrent.to_string(),
+            PreferenceField::PeerLimitGlobal => prefs.peer_limit_global.to_string(),
+            PreferenceField::BlocklistUrl => prefs.blocklist_url.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn apply_input(&self, prefs: &mut DaemonPreferences, input: &str) -> Result<(), String> {
+        match self {
+            PreferenceField::DownloadDir => {
+                let value = input.trim().to_string();
+                if value.is_empty() {
+                    Err("Download directory cannot be empty".into())
+                } else {
+                    prefs.download_dir = value;
+                    Ok(())
+                }
+            }
+            PreferenceField::SpeedLimitUp => {
+                prefs.speed_limit_up = parse_non_negative(input, "upload limit")?;
+                Ok(())
+            }
+            PreferenceField::SpeedLimitDown => {
+                prefs.speed_limit_down = parse_non_negative(input, "download limit")?;
+                Ok(())
+            }
+            PreferenceField::SeedRatioLimit => {
+                let value = input
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| "Enter a numeric ratio (e.g. 2 or 2.0)".to_string())?;
+                if value <= 0.0 {
+                    return Err("Ratio must be greater than zero".into());
+                }
+                prefs.seed_ratio_limit = value;
+                Ok(())
+            }
+            PreferenceField::IdleSeedingLimit => {
+                prefs.idle_seeding_limit = parse_non_negative(input, "idle minutes")?;
+                Ok(())
+            }
+            PreferenceField::PeerLimitPerTorrent => {
+                prefs.peer_limit_per_torrent = parse_positive(input, "peers per torrent")?;
+                Ok(())
+            }
+            PreferenceField::PeerLimitGlobal => {
+                prefs.peer_limit_global = parse_positive(input, "max peers")?;
+                Ok(())
+            }
+            PreferenceField::BlocklistUrl => {
+                let value = input.trim().to_string();
+                if value.is_empty() {
+                    prefs.blocklist_url = None;
+                } else {
+                    prefs.blocklist_url = Some(value);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn toggle_label(value: bool) -> String {
+    if value {
+        "On".to_string()
+    } else {
+        "Off".to_string()
+    }
+}
+
+fn format_speed_limit(value: u32) -> String {
+    if value == 0 {
+        "Unlimited".to_string()
+    } else {
+        format!("{value} KiB/s")
+    }
+}
+
+fn parse_non_negative(input: &str, label: &str) -> Result<u32, String> {
+    let value = input
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| format!("Enter a valid number for {label}"))?;
+    if value < 0 {
+        return Err(format!("{label} must be zero or positive"));
+    }
+    Ok(value as u32)
+}
+
+fn parse_positive(input: &str, label: &str) -> Result<u32, String> {
+    let value = input
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| format!("Enter a valid number for {label}"))?;
+    if value <= 0 {
+        return Err(format!("{label} must be greater than zero"));
+    }
+    Ok(value as u32)
+}
+
 enum InputMode {
     Normal,
     Filter { buffer: String },
     Prompt(PromptState),
     Confirm(ConfirmState),
     Help,
+    Preferences(PreferencesState),
 }
 
 enum FilterAction {
@@ -1183,6 +1922,8 @@ enum RpcCommand {
         id: i64,
         name: String,
     },
+    FetchPreferences,
+    UpdatePreferences(DaemonPreferences),
 }
 
 fn summary_line(summary: &TorrentSummary) -> String {
@@ -1243,6 +1984,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from("  R: refresh now"),
         Line::from("  p: pause selected torrent"),
         Line::from("  a: add magnet"),
+        Line::from("  o: edit daemon preferences"),
         Line::from("  dd: delete highlighted torrent"),
         Line::from("  /: filter list"),
         Line::from("  Esc: clear filter / cancel dialog"),

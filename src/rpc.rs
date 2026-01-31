@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::{
     config::RpcConfig,
     model::{Snapshot, TorrentSummary},
+    preferences::{DaemonPreferences, PreferencesResponse, PREFERENCE_FIELDS},
 };
 
 #[derive(Debug, Error)]
@@ -64,6 +65,17 @@ impl TransmissionClient {
             session_id: Mutex::new(None),
             counter: AtomicU64::new(1),
         })
+    }
+
+    pub fn fetch_preferences(&self) -> RpcResult<DaemonPreferences> {
+        let prefs: PreferencesResponse = self.session_get(PREFERENCE_FIELDS)?;
+        Ok(DaemonPreferences::from(prefs))
+    }
+
+    pub fn update_preferences(&self, prefs: &DaemonPreferences) -> RpcResult<()> {
+        let args = Value::Object(prefs.to_rpc_map());
+        self.call_raw("session-set", Some(args))?;
+        Ok(())
     }
 
     pub fn fetch_snapshot(&self) -> RpcResult<Snapshot> {
