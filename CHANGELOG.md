@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.5](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.5)
+
+- Torrent overview now displays ETA and reorders the Progress column to show Status, DL, UL, Progress, ETA for quicker status reads.
+- Details pane metadata now renders in a tidy key/value table with trimmed values for easier scanning.
+
 ## [0.0.4](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.4)
 
 - Table-based torrent list with headers (Name/Status/Progress/DL/UL) for consistent alignment and readability.

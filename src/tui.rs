@@ -520,7 +520,7 @@ impl App {
     fn render_body(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
         self.render_list(frame, chunks[0]);
         self.render_detail(frame, chunks[1]);
@@ -530,9 +530,10 @@ impl App {
         let header = Row::new(vec![
             Cell::from("Name"),
             Cell::from("Status"),
-            Cell::from(format!("{:>9}", "Progress")),
             Cell::from(format!("{:>12}", "DL")),
             Cell::from(format!("{:>12}", "UL")),
+            Cell::from(format!("{:>9}", "Progress")),
+            Cell::from(format!("{:>10}", "ETA")),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -549,6 +550,7 @@ impl App {
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
+                Cell::from(""),
             ]));
         }
         let block = Block::default()
@@ -557,9 +559,10 @@ impl App {
         let widths = [
             Constraint::Percentage(50),
             Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
             Constraint::Length(9),
-            Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Length(10),
         ];
         let table = Table::new(rows, widths)
             .header(header)
@@ -580,41 +583,66 @@ impl App {
             if inner.height == 0 {
                 return;
             }
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    torrent.name.clone(),
+            let label_cell = |text: &str| {
+                Cell::from(Span::styled(
+                    text.to_string(),
                     Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(format!("Status: {}", torrent.status)),
-                Line::from(format!(
-                    "Progress: {}  ETA {}",
-                    format_progress(torrent.percent_done),
-                    format_eta(torrent.eta)
-                )),
-                Line::from(format!(
-                    "Size: {} (remaining {})",
-                    format_bytes(torrent.size_when_done),
-                    format_bytes(torrent.left_until_done)
-                )),
-                Line::from(format!(
-                    "Rates: DL {}  UL {}",
-                    format_speed(torrent.rate_download),
-                    format_speed(torrent.rate_upload)
-                )),
-                Line::from(format!("Ratio: {:.2}", torrent.upload_ratio)),
-                Line::from(format!(
-                    "Peers: sending {} | receiving {} | connected {}",
-                    torrent.peers_sending, torrent.peers_receiving, torrent.peers_connected
-                )),
-                Line::from(format!("Path: {}", torrent.download_dir)),
+                ))
+            };
+            let trim_value = |value: String| value.trim_start().to_string();
+            let mut rows = vec![
+                Row::new(vec![
+                    label_cell("Name"),
+                    Cell::from(Span::styled(
+                        torrent.name.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                ]),
+                Row::new(vec![label_cell("Status"), Cell::from(torrent.status.clone())]),
+                Row::new(vec![
+                    label_cell("Progress"),
+                    Cell::from(format!(
+                        "{}  ETA {}",
+                        trim_value(format_progress(torrent.percent_done)),
+                        format_eta(torrent.eta)
+                    )),
+                ]),
+                Row::new(vec![
+                    label_cell("Size"),
+                    Cell::from(format!(
+                        "{} (remaining {})",
+                        trim_value(format_bytes(torrent.size_when_done)),
+                        trim_value(format_bytes(torrent.left_until_done))
+                    )),
+                ]),
+                Row::new(vec![
+                    label_cell("Rates"),
+                    Cell::from(format!(
+                        "DL {}  UL {}",
+                        trim_value(format_speed(torrent.rate_download)),
+                        trim_value(format_speed(torrent.rate_upload))
+                    )),
+                ]),
+                Row::new(vec![
+                    label_cell("Ratio"),
+                    Cell::from(format!("{:.2}", torrent.upload_ratio)),
+                ]),
+                Row::new(vec![
+                    label_cell("Peers"),
+                    Cell::from(format!(
+                        "sending {} | receiving {} | connected {}",
+                        torrent.peers_sending, torrent.peers_receiving, torrent.peers_connected
+                    )),
+                ]),
+                Row::new(vec![label_cell("Path"), Cell::from(torrent.download_dir.clone())]),
             ];
             if let Some(error) = &torrent.error {
-                lines.push(Line::from(Span::styled(
-                    format!("Error: {error}"),
-                    Style::default().fg(Color::Red),
-                )));
+                rows.push(
+                    Row::new(vec![label_cell("Error"), Cell::from(error.clone())])
+                        .style(Style::default().fg(Color::Red)),
+                );
             }
-            let info_height = lines.len() as u16;
+            let info_height = rows.len() as u16;
             let info_area_height = info_height.min(inner.height);
             if info_area_height > 0 {
                 let info_area = Rect {
@@ -623,8 +651,9 @@ impl App {
                     width: inner.width,
                     height: info_area_height,
                 };
-                let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, info_area);
+                let table = Table::new(rows, [Constraint::Length(12), Constraint::Min(10)])
+                    .column_spacing(2);
+                frame.render_widget(table, info_area);
             }
             let remaining_height = inner.height.saturating_sub(info_area_height);
             if remaining_height >= 3 {
@@ -676,7 +705,13 @@ impl App {
             Cell::from(format!("{:>12}", "UL")),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
-        let mut rows: Vec<Row> = torrent.peers.iter().map(peer_row).collect();
+        let mut peers = torrent.peers.iter().collect::<Vec<_>>();
+        peers.sort_by(|a, b| {
+            b.rate_down
+                .cmp(&a.rate_down)
+                .then_with(|| b.rate_up.cmp(&a.rate_up))
+        });
+        let mut rows: Vec<Row> = peers.into_iter().map(peer_row).collect();
         if rows.is_empty() {
             rows.push(Row::new(vec![
                 Cell::from("No connected peers"),
@@ -2125,9 +2160,10 @@ fn torrent_row(summary: &TorrentSummary) -> Row<'static> {
     Row::new(vec![
         Cell::from(summary.name.clone()),
         Cell::from(summary.status.clone()),
-        Cell::from(format!("{:>9}", format_progress(summary.percent_done))),
         Cell::from(format!("{:>12}", format_speed(summary.rate_download))),
         Cell::from(format!("{:>12}", format_speed(summary.rate_upload))),
+        Cell::from(format!("{:>9}", format_progress(summary.percent_done))),
+        Cell::from(format!("{:>10}", format_eta(summary.eta))),
     ])
 }
 
