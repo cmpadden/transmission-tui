@@ -647,6 +647,8 @@ struct PeerWire {
     rate_to_client: i64,
     #[serde(default, alias = "rateToPeer")]
     rate_to_peer: i64,
+    #[serde(default, alias = "isEncrypted")]
+    is_encrypted: bool,
 }
 
 impl From<PeerWire> for PeerSummary {
@@ -657,6 +659,7 @@ impl From<PeerWire> for PeerSummary {
             progress: wire.progress,
             rate_down: wire.rate_to_client,
             rate_up: wire.rate_to_peer,
+            is_encrypted: wire.is_encrypted,
         }
     }
 }

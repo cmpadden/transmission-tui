@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.6)
+
+- Peer pane columns expanded with an `Enc` flag and the RPC now includes peer encryption state alongside live rates.
+- Added a `DD` shortcut that mirrors Transmission web's “trash data” remove action, plus a help overlay rendered as a table of key bindings.
+- Torrent list now includes a Ratio column so seeding progress is visible without opening the details pane.
+
 ## [0.0.5](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.5)
 
 - Torrent overview now displays ETA and reorders the Progress column to show Status, DL, UL, Progress, ETA for quicker status reads.

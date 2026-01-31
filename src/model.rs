@@ -38,6 +38,7 @@ pub struct PeerSummary {
     pub progress: f64,
     pub rate_down: i64,
     pub rate_up: i64,
+    pub is_encrypted: bool,
 }
 
 pub fn format_speed(value: i64) -> String {

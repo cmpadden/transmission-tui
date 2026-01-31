@@ -396,6 +396,8 @@ struct App {
     pending_manual_refresh: bool,
     delete_armed: bool,
     delete_armed_until: Option<Instant>,
+    trash_armed: bool,
+    trash_armed_until: Option<Instant>,
 }
 
 impl App {
@@ -417,6 +419,8 @@ impl App {
             pending_manual_refresh: false,
             delete_armed: false,
             delete_armed_until: None,
+            trash_armed: false,
+            trash_armed_until: None,
         }
     }
 
@@ -463,13 +467,8 @@ impl App {
             }
             InputMode::Help => {
                 let area = centered_rect(70, 70, frame.size());
-                let block = Block::default().title("Key Bindings").borders(Borders::ALL);
-                let lines = help_lines();
-                let paragraph = Paragraph::new(lines)
-                    .block(block)
-                    .wrap(Wrap { trim: false });
                 frame.render_widget(Clear, area);
-                frame.render_widget(paragraph, area);
+                self.render_help(frame, area);
             }
             InputMode::Preferences(state) => {
                 let area = centered_rect(80, 80, frame.size());
@@ -534,6 +533,7 @@ impl App {
             Cell::from(format!("{:>12}", "UL")),
             Cell::from(format!("{:>9}", "Progress")),
             Cell::from(format!("{:>10}", "ETA")),
+            Cell::from(format!("{:>8}", "Ratio")),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -551,6 +551,7 @@ impl App {
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
+                Cell::from(""),
             ]));
         }
         let block = Block::default()
@@ -563,6 +564,7 @@ impl App {
             Constraint::Length(12),
             Constraint::Length(9),
             Constraint::Length(10),
+            Constraint::Length(8),
         ];
         let table = Table::new(rows, widths)
             .header(header)
@@ -598,7 +600,10 @@ impl App {
                         Style::default().add_modifier(Modifier::BOLD),
                     )),
                 ]),
-                Row::new(vec![label_cell("Status"), Cell::from(torrent.status.clone())]),
+                Row::new(vec![
+                    label_cell("Status"),
+                    Cell::from(torrent.status.clone()),
+                ]),
                 Row::new(vec![
                     label_cell("Progress"),
                     Cell::from(format!(
@@ -634,7 +639,10 @@ impl App {
                         torrent.peers_sending, torrent.peers_receiving, torrent.peers_connected
                     )),
                 ]),
-                Row::new(vec![label_cell("Path"), Cell::from(torrent.download_dir.clone())]),
+                Row::new(vec![
+                    label_cell("Path"),
+                    Cell::from(torrent.download_dir.clone()),
+                ]),
             ];
             if let Some(error) = &torrent.error {
                 rows.push(
@@ -703,6 +711,7 @@ impl App {
             Cell::from(format!("{:>9}", "Progress")),
             Cell::from(format!("{:>12}", "DL")),
             Cell::from(format!("{:>12}", "UL")),
+            Cell::from(format!("{:>4}", "Enc")),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
         let mut peers = torrent.peers.iter().collect::<Vec<_>>();
@@ -719,17 +728,34 @@ impl App {
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
+                Cell::from(""),
             ]));
         }
         let widths = [
             Constraint::Percentage(35),
-            Constraint::Percentage(30),
+            Constraint::Percentage(35),
             Constraint::Length(9),
             Constraint::Length(12),
             Constraint::Length(12),
+            Constraint::Length(4),
         ];
         let table = Table::new(rows, widths).header(header).column_spacing(1);
         frame.render_widget(table, table_area);
+    }
+
+    fn render_help(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title(Span::raw(" Key Bindings "))
+            .borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        let rows = help_rows();
+        let widths = [Constraint::Length(22), Constraint::Min(20)];
+        let table = Table::new(rows, widths).column_spacing(2);
+        frame.render_widget(table, inner);
     }
 
     fn render_preferences(&self, frame: &mut Frame, area: Rect, state: &PreferencesState) {
@@ -1138,7 +1164,9 @@ impl App {
 
     fn handle_normal_key(&mut self, key: KeyEvent, rpc_tx: &Sender<RpcCommand>) -> Result<bool> {
         let plain_d = matches!(key.code, KeyCode::Char('d')) && key.modifiers.is_empty();
-        if !plain_d {
+        let destructive_key =
+            matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) && key.modifiers.is_empty();
+        if !destructive_key {
             self.disarm_delete();
         }
         match key.code {
@@ -1210,9 +1238,18 @@ impl App {
             KeyCode::Char('d') if plain_d => {
                 if self.delete_armed {
                     self.disarm_delete();
-                    self.prompt_delete_current();
+                    self.prompt_delete_current(false);
                 } else {
                     self.arm_delete();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('D') => {
+                if self.trash_armed {
+                    self.disarm_delete();
+                    self.prompt_delete_current(true);
+                } else {
+                    self.arm_trash();
                 }
                 Ok(false)
             }
@@ -1346,6 +1383,13 @@ impl App {
                 }
             }
         }
+        if self.trash_armed {
+            if let Some(deadline) = self.trash_armed_until {
+                if Instant::now() >= deadline {
+                    self.disarm_delete();
+                }
+            }
+        }
     }
 
     fn set_status(&mut self, update: StatusUpdate) {
@@ -1359,6 +1403,8 @@ impl App {
     fn disarm_delete(&mut self) {
         self.delete_armed = false;
         self.delete_armed_until = None;
+        self.trash_armed = false;
+        self.trash_armed_until = None;
     }
 
     fn queue_refresh(&mut self, rpc_tx: &Sender<RpcCommand>) {
@@ -1377,11 +1423,20 @@ impl App {
         ));
     }
 
-    fn prompt_delete_current(&mut self) {
+    fn arm_trash(&mut self) {
+        self.trash_armed = true;
+        self.trash_armed_until = Some(Instant::now() + Duration::from_secs(2));
+        self.set_status(StatusUpdate::info(
+            "Press D again to trash data and remove the selected torrent",
+        ));
+    }
+
+    fn prompt_delete_current(&mut self, delete_data: bool) {
         if let Some(torrent) = self.current_torrent().cloned() {
             self.mode = InputMode::Confirm(ConfirmState::remove_torrent(
                 torrent.name.clone(),
                 torrent.torrent_id,
+                delete_data,
             ));
         } else {
             self.set_status(StatusUpdate::error("No torrent selected to delete"));
@@ -1470,13 +1525,26 @@ struct ConfirmState {
 }
 
 impl ConfirmState {
-    fn remove_torrent(name: String, id: i64) -> Self {
+    fn remove_torrent(name: String, id: i64, delete_data: bool) -> Self {
+        let (title, message) = if delete_data {
+            (
+                "Trash data & remove",
+                format!(
+                    "Trash data and remove '{name}' from Transmission? This deletes local files."
+                ),
+            )
+        } else {
+            (
+                "Remove torrent",
+                format!("Remove '{name}' from Transmission?"),
+            )
+        };
         Self {
-            title: "Remove torrent",
-            message: format!("Remove '{name}' from Transmission?"),
+            title,
+            message,
             target_id: id,
             target_name: name,
-            delete_data: false,
+            delete_data,
         }
     }
 }
@@ -2164,6 +2232,7 @@ fn torrent_row(summary: &TorrentSummary) -> Row<'static> {
         Cell::from(format!("{:>12}", format_speed(summary.rate_upload))),
         Cell::from(format!("{:>9}", format_progress(summary.percent_done))),
         Cell::from(format!("{:>10}", format_eta(summary.eta))),
+        Cell::from(format!("{:>8.2}", summary.upload_ratio)),
     ])
 }
 
@@ -2174,6 +2243,10 @@ fn peer_row(peer: &PeerSummary) -> Row<'static> {
         Cell::from(format!("{:>9}", format_progress(peer.progress))),
         Cell::from(format!("{:>12}", format_speed(peer.rate_down))),
         Cell::from(format!("{:>12}", format_speed(peer.rate_up))),
+        Cell::from(format!(
+            "{:>4}",
+            if peer.is_encrypted { "Yes" } else { "No" }
+        )),
     ])
 }
 
@@ -2206,33 +2279,38 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     vertical[1]
 }
 
-fn help_lines() -> Vec<Line<'static>> {
+fn help_rows() -> Vec<Row<'static>> {
+    let heading_style = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let heading = |text: &'static str| {
-        Line::from(Span::styled(
-            text,
-            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ))
+        Row::new(vec![
+            Cell::from(Span::styled(text, heading_style)),
+            Cell::from(Span::raw("")),
+        ])
     };
+    let entry =
+        |keys: &'static str, desc: &'static str| Row::new(vec![Cell::from(keys), Cell::from(desc)]);
+    let spacer = || Row::new(vec![Cell::from(""), Cell::from("")]);
     vec![
         heading("Navigation"),
-        Line::from("  j / k: move selection"),
-        Line::from("  g / G: jump to first / last"),
-        Line::from("  Ctrl+d / Ctrl+u: half-page down/up"),
-        Line::from(""),
+        entry("j / k", "Move selection"),
+        entry("g / G", "Jump to first / last"),
+        entry("Ctrl+d / Ctrl+u", "Half-page down / up"),
+        spacer(),
         heading("Actions"),
-        Line::from("  r: resume selected torrent"),
-        Line::from("  R: refresh now"),
-        Line::from("  p: pause selected torrent"),
-        Line::from("  a: add magnet"),
-        Line::from("  o: edit daemon preferences"),
-        Line::from("  dd: delete highlighted torrent"),
-        Line::from("  /: filter list"),
-        Line::from("  Esc: clear filter / cancel dialog"),
-        Line::from("  ?: toggle this help"),
-        Line::from("  q or Ctrl+c: quit"),
-        Line::from(""),
+        entry("r", "Resume selected torrent"),
+        entry("R", "Refresh now"),
+        entry("p", "Pause selected torrent"),
+        entry("a", "Add magnet"),
+        entry("o", "Edit daemon preferences"),
+        entry("dd", "Delete highlighted torrent"),
+        entry("DD", "Trash data + remove highlighted torrent"),
+        entry("/", "Filter list"),
+        entry("Esc", "Clear filter / cancel dialog"),
+        entry("?", "Toggle this help"),
+        entry("q or Ctrl+c", "Quit"),
+        spacer(),
         heading("Dialogs"),
-        Line::from("  Prompt: Enter to submit, Esc to cancel"),
-        Line::from("  Confirm: y to accept, n/Esc to cancel"),
+        entry("Prompt", "Enter to submit, Esc to cancel"),
+        entry("Confirm", "y to accept, n/Esc to cancel"),
     ]
 }
