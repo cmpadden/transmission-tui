@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.3)
+
+- Preferences overlay now groups fields into titled sections (Downloading, Seeding, Speed Limits, Connections, Encryption Options, Blocklist) while keeping selection order intact for smoother navigation.
+
 ## [0.0.2](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.2)
 
 - Add an in-app Preferences overlay (`o`) that fetches and edits Transmission's daemon settings (download directory, limits, seeding rules, discovery toggles, blocklist, etc.) directly via the RPC API.

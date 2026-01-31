@@ -33,6 +33,12 @@ A [Ratatui](https://github.com/ratatui/ratatui)-based terminal UI for managing `
 Mode NORMAL | Filter (no filter)                                                    Help [?]
 ```
 
+## Installation
+
+```
+cargo install --git https://github.com/colton/transmission-tui --locked
+```
+
 ## Features
 
 - Async-friendly RPC worker thread that keeps the UI responsive while polling the daemon.

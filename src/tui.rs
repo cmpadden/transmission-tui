@@ -624,23 +624,43 @@ impl App {
                 }
                 lines.push(Line::from(instructions.join("  ·  ")));
                 lines.push(Line::from(""));
-                for (idx, field) in PREFERENCE_FORM_FIELDS.iter().enumerate() {
-                    let mut spans = Vec::new();
-                    if idx == form.selected {
-                        spans.push(Span::styled("> ", Style::default().fg(Color::Yellow)));
-                    } else {
-                        spans.push(Span::raw("  "));
+                let mut idx = 0usize;
+                for (section_idx, section) in PREFERENCE_SECTIONS.iter().enumerate() {
+                    if section_idx > 0 {
+                        lines.push(Line::from(""));
                     }
-                    spans.push(Span::styled(
-                        format!("{:<28}", field.label()),
-                        Style::default().add_modifier(if idx == form.selected {
-                            Modifier::BOLD
+                    lines.push(Line::from(Span::styled(
+                        section.title,
+                        Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    )));
+                    if let Some(note) = section.note {
+                        lines.push(Line::from(Span::styled(
+                            note,
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    if section.fields.is_empty() {
+                        continue;
+                    }
+                    for field in section.fields.iter() {
+                        let mut spans = Vec::new();
+                        if idx == form.selected {
+                            spans.push(Span::styled("> ", Style::default().fg(Color::Yellow)));
                         } else {
-                            Modifier::empty()
-                        }),
-                    ));
-                    spans.push(Span::raw(field.display_value(&form.prefs)));
-                    lines.push(Line::from(spans));
+                            spans.push(Span::raw("  "));
+                        }
+                        spans.push(Span::styled(
+                            format!("{:<28}", field.label()),
+                            Style::default().add_modifier(if idx == form.selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                        ));
+                        spans.push(Span::raw(field.display_value(&form.prefs)));
+                        lines.push(Line::from(spans));
+                        idx += 1;
+                    }
                 }
                 lines.push(Line::from(""));
                 if let Some(editor) = &form.editing {
@@ -1358,14 +1378,14 @@ struct PreferenceInputResult {
 enum PreferenceField {
     DownloadDir,
     StartWhenAdded,
-    SpeedLimitUpEnabled,
-    SpeedLimitUp,
-    SpeedLimitDownEnabled,
-    SpeedLimitDown,
     SeedRatioLimited,
     SeedRatioLimit,
     IdleSeedingEnabled,
     IdleSeedingLimit,
+    SpeedLimitUpEnabled,
+    SpeedLimitUp,
+    SpeedLimitDownEnabled,
+    SpeedLimitDown,
     PeerLimitPerTorrent,
     PeerLimitGlobal,
     Encryption,
@@ -1379,14 +1399,14 @@ enum PreferenceField {
 const PREFERENCE_FORM_FIELDS: [PreferenceField; 18] = [
     PreferenceField::DownloadDir,
     PreferenceField::StartWhenAdded,
-    PreferenceField::SpeedLimitUpEnabled,
-    PreferenceField::SpeedLimitUp,
-    PreferenceField::SpeedLimitDownEnabled,
-    PreferenceField::SpeedLimitDown,
     PreferenceField::SeedRatioLimited,
     PreferenceField::SeedRatioLimit,
     PreferenceField::IdleSeedingEnabled,
     PreferenceField::IdleSeedingLimit,
+    PreferenceField::SpeedLimitUpEnabled,
+    PreferenceField::SpeedLimitUp,
+    PreferenceField::SpeedLimitDownEnabled,
+    PreferenceField::SpeedLimitDown,
     PreferenceField::PeerLimitPerTorrent,
     PreferenceField::PeerLimitGlobal,
     PreferenceField::Encryption,
@@ -1395,6 +1415,81 @@ const PREFERENCE_FORM_FIELDS: [PreferenceField; 18] = [
     PreferenceField::LpdEnabled,
     PreferenceField::BlocklistEnabled,
     PreferenceField::BlocklistUrl,
+];
+
+struct PreferenceSection {
+    title: &'static str,
+    fields: &'static [PreferenceField],
+    note: Option<&'static str>,
+}
+
+const DOWNLOADING_FIELDS: [PreferenceField; 2] = [
+    PreferenceField::DownloadDir,
+    PreferenceField::StartWhenAdded,
+];
+
+const SEEDING_FIELDS: [PreferenceField; 4] = [
+    PreferenceField::SeedRatioLimited,
+    PreferenceField::SeedRatioLimit,
+    PreferenceField::IdleSeedingEnabled,
+    PreferenceField::IdleSeedingLimit,
+];
+
+const SPEED_FIELDS: [PreferenceField; 4] = [
+    PreferenceField::SpeedLimitUpEnabled,
+    PreferenceField::SpeedLimitUp,
+    PreferenceField::SpeedLimitDownEnabled,
+    PreferenceField::SpeedLimitDown,
+];
+
+const CONNECTION_FIELDS: [PreferenceField; 2] = [
+    PreferenceField::PeerLimitPerTorrent,
+    PreferenceField::PeerLimitGlobal,
+];
+
+const ENCRYPTION_FIELDS: [PreferenceField; 4] = [
+    PreferenceField::Encryption,
+    PreferenceField::PexEnabled,
+    PreferenceField::DhtEnabled,
+    PreferenceField::LpdEnabled,
+];
+
+const BLOCKLIST_FIELDS: [PreferenceField; 2] = [
+    PreferenceField::BlocklistEnabled,
+    PreferenceField::BlocklistUrl,
+];
+
+const PREFERENCE_SECTIONS: [PreferenceSection; 6] = [
+    PreferenceSection {
+        title: "Downloading",
+        fields: &DOWNLOADING_FIELDS,
+        note: None,
+    },
+    PreferenceSection {
+        title: "Seeding",
+        fields: &SEEDING_FIELDS,
+        note: None,
+    },
+    PreferenceSection {
+        title: "Speed Limits",
+        fields: &SPEED_FIELDS,
+        note: None,
+    },
+    PreferenceSection {
+        title: "Connections",
+        fields: &CONNECTION_FIELDS,
+        note: None,
+    },
+    PreferenceSection {
+        title: "Encryption Options",
+        fields: &ENCRYPTION_FIELDS,
+        note: None,
+    },
+    PreferenceSection {
+        title: "Blocklist",
+        fields: &BLOCKLIST_FIELDS,
+        note: None,
+    },
 ];
 
 impl PreferencesState {
@@ -1495,10 +1590,8 @@ impl PreferencesState {
                         form.cycle_encryption(1);
                     }
                     KeyCode::Enter => {
-                        if !form.start_editor() {
-                            if !form.toggle_selected() {
-                                form.cycle_encryption(1);
-                            }
+                        if !form.start_editor() && !form.toggle_selected() {
+                            form.cycle_encryption(1);
                         }
                     }
                     KeyCode::Char('s') => {

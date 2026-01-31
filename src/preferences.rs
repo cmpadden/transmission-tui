@@ -84,8 +84,9 @@ impl DaemonPreferences {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncryptionMode {
+    #[default]
     Prefer,
     Allow,
     Require,
@@ -122,12 +123,6 @@ impl EncryptionMode {
             EncryptionMode::Allow,
             EncryptionMode::Require,
         ]
-    }
-}
-
-impl Default for EncryptionMode {
-    fn default() -> Self {
-        EncryptionMode::Prefer
     }
 }
 
