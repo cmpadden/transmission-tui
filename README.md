@@ -36,7 +36,7 @@ Mode NORMAL | Filter (no filter)                                                
 ## Installation
 
 ```
-cargo install --git https://github.com/colton/transmission-tui --locked
+cargo install --git https://github.com/cmpadden/transmission-tui --locked
 ```
 
 ## Features
