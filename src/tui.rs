@@ -18,13 +18,16 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
     Frame, Terminal,
 };
 
 use crate::{
     config::AppConfig,
-    model::{format_bytes, format_eta, format_progress, format_speed, Snapshot, TorrentSummary},
+    model::{
+        format_bytes, format_eta, format_progress, format_speed, PeerSummary, Snapshot,
+        TorrentSummary,
+    },
     preferences::{DaemonPreferences, EncryptionMode},
     rpc::{RpcResult, TransmissionClient},
 };
@@ -380,7 +383,7 @@ struct App {
     connection_label: String,
     snapshot: Option<Snapshot>,
     preferences_cache: Option<DaemonPreferences>,
-    list_state: ListState,
+    list_state: TableState,
     filtered_indices: Vec<usize>,
     filter_text: String,
     filter_lower: String,
@@ -401,7 +404,7 @@ impl App {
             connection_label: config.rpc.endpoint(),
             snapshot: None,
             preferences_cache: None,
-            list_state: ListState::default(),
+            list_state: TableState::default(),
             filtered_indices: Vec::new(),
             filter_text: String::new(),
             filter_lower: String::new(),
@@ -524,23 +527,47 @@ impl App {
     }
 
     fn render_list(&mut self, frame: &mut Frame, area: Rect) {
-        let mut items = self
+        let header = Row::new(vec![
+            Cell::from("Name"),
+            Cell::from("Status"),
+            Cell::from(format!("{:>9}", "Progress")),
+            Cell::from(format!("{:>12}", "DL")),
+            Cell::from(format!("{:>12}", "UL")),
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD));
+
+        let mut rows = self
             .filtered_indices
             .iter()
             .filter_map(|&idx| self.snapshot.as_ref()?.torrents.get(idx))
-            .map(|torrent| ListItem::new(Line::from(summary_line(torrent))))
+            .map(torrent_row)
             .collect::<Vec<_>>();
-        if items.is_empty() {
-            items.push(ListItem::new(Line::from("No torrents loaded")));
+        if rows.is_empty() {
+            rows.push(Row::new(vec![
+                Cell::from("No torrents loaded"),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ]));
         }
         let block = Block::default()
             .borders(Borders::ALL)
             .title(Span::raw(" Torrents "));
-        let list = List::new(items)
+        let widths = [
+            Constraint::Percentage(50),
+            Constraint::Length(12),
+            Constraint::Length(9),
+            Constraint::Length(12),
+            Constraint::Length(12),
+        ];
+        let table = Table::new(rows, widths)
+            .header(header)
             .block(block)
+            .column_spacing(2)
             .highlight_style(Style::default().fg(Color::Yellow))
             .highlight_symbol("> ");
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        frame.render_stateful_widget(table, area, &mut self.list_state);
     }
 
     fn render_detail(&self, frame: &mut Frame, area: Rect) {
@@ -548,7 +575,12 @@ impl App {
             .borders(Borders::ALL)
             .title(Span::raw(" Details "));
         if let Some(torrent) = self.current_torrent() {
-            let content = vec![
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            if inner.height == 0 {
+                return;
+            }
+            let mut lines = vec![
                 Line::from(Span::styled(
                     torrent.name.clone(),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -576,23 +608,93 @@ impl App {
                 )),
                 Line::from(format!("Path: {}", torrent.download_dir)),
             ];
-            let mut lines = content;
             if let Some(error) = &torrent.error {
                 lines.push(Line::from(Span::styled(
                     format!("Error: {error}"),
                     Style::default().fg(Color::Red),
                 )));
             }
-            let paragraph = Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: false });
-            frame.render_widget(paragraph, area);
+            let info_height = lines.len() as u16;
+            let info_area_height = info_height.min(inner.height);
+            if info_area_height > 0 {
+                let info_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: info_area_height,
+                };
+                let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+                frame.render_widget(paragraph, info_area);
+            }
+            let remaining_height = inner.height.saturating_sub(info_area_height);
+            if remaining_height >= 3 {
+                let peers_area = Rect {
+                    x: inner.x,
+                    y: inner.y + info_area_height + 1,
+                    width: inner.width,
+                    height: remaining_height - 1,
+                };
+                self.render_peers(frame, peers_area, torrent);
+            }
         } else {
             let paragraph = Paragraph::new("No torrent selected")
                 .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, area);
         }
+    }
+
+    fn render_peers(&self, frame: &mut Frame, area: Rect, torrent: &TorrentSummary) {
+        if area.height < 2 {
+            return;
+        }
+        let title = Paragraph::new(Line::from(Span::styled(
+            "Peers",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let title_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(title, title_area);
+        if area.height == 1 {
+            return;
+        }
+        let table_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 1,
+        };
+        let header = Row::new(vec![
+            Cell::from("Address"),
+            Cell::from("Client"),
+            Cell::from(format!("{:>9}", "Progress")),
+            Cell::from(format!("{:>12}", "DL")),
+            Cell::from(format!("{:>12}", "UL")),
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD));
+        let mut rows: Vec<Row> = torrent.peers.iter().map(peer_row).collect();
+        if rows.is_empty() {
+            rows.push(Row::new(vec![
+                Cell::from("No connected peers"),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ]));
+        }
+        let widths = [
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+            Constraint::Length(9),
+            Constraint::Length(12),
+            Constraint::Length(12),
+        ];
+        let table = Table::new(rows, widths).header(header).column_spacing(1);
+        frame.render_widget(table, table_area);
     }
 
     fn render_preferences(&self, frame: &mut Frame, area: Rect, state: &PreferencesState) {
@@ -2019,15 +2121,24 @@ enum RpcCommand {
     UpdatePreferences(DaemonPreferences),
 }
 
-fn summary_line(summary: &TorrentSummary) -> String {
-    format!(
-        "{:<40.40}  {:<11}  {:>6}  DL {:>7}  UL {:>7}",
-        summary.name,
-        summary.status,
-        format_progress(summary.percent_done),
-        format_speed(summary.rate_download),
-        format_speed(summary.rate_upload)
-    )
+fn torrent_row(summary: &TorrentSummary) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(summary.name.clone()),
+        Cell::from(summary.status.clone()),
+        Cell::from(format!("{:>9}", format_progress(summary.percent_done))),
+        Cell::from(format!("{:>12}", format_speed(summary.rate_download))),
+        Cell::from(format!("{:>12}", format_speed(summary.rate_upload))),
+    ])
+}
+
+fn peer_row(peer: &PeerSummary) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(peer.address.clone()),
+        Cell::from(peer.client.clone()),
+        Cell::from(format!("{:>9}", format_progress(peer.progress))),
+        Cell::from(format!("{:>12}", format_speed(peer.rate_down))),
+        Cell::from(format!("{:>12}", format_speed(peer.rate_up))),
+    ])
 }
 
 fn status_style(level: StatusLevel) -> Style {

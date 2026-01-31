@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.4)
+
+- Table-based torrent list with headers (Name/Status/Progress/DL/UL) for consistent alignment and readability.
+- JSON-RPC 2.0 support with automatic fallback to Transmission's legacy RPC dialect when needed.
+- Peer detail table in the Details pane showing per-peer address, client, progress, and transfer rates.
+- Session preference RPC keys now use snake_case and accept the new encryption strings to match Transmission 4.1+.
+- Details pane now wraps text, spaces the peers section, and aligns rate/progress fields to match the torrent list formatting.
+
 ## [0.0.3](https://github.com/cmpadden/transmission-tui/releases/tag/v0.0.3)
 
 - Preferences overlay now groups fields into titled sections (Downloading, Seeding, Speed Limits, Connections, Encryption Options, Blocklist) while keeping selection order intact for smoother navigation.

@@ -28,6 +28,16 @@ pub struct TorrentSummary {
     pub peers_sending: i64,
     pub peers_receiving: i64,
     pub error: Option<String>,
+    pub peers: Vec<PeerSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerSummary {
+    pub address: String,
+    pub client: String,
+    pub progress: f64,
+    pub rate_down: i64,
+    pub rate_up: i64,
 }
 
 pub fn format_speed(value: i64) -> String {
